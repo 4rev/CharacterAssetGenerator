@@ -1,186 +1,201 @@
-# Implementation Plan (V1)
+# Implementation Plan
 
-**Philosophy:** ship what today's tech does well. Hard-surface modular assets, local-only, on-demand AI review.
-
-**Target:** 10–14 weeks solo, part-time (alongside a primary project). 6–8 weeks if full-time.
-
-**Explicitly cut from V1:** cloth & hair reconstruction, multiple skeleton variants, Tier 2 local classifier, global server, crowdsourced retraining, opt-in anonymisation. These are revisited only after V1 ships and only if warranted.
+7 phases, ~20 weeks to a releasable open-source plugin.
 
 ---
 
-## Phase 1 — Foundation (Weeks 1–3)
-*Scaffold, build toolchain, adapter interfaces, UE5 integration spike*
+## Phase 1 — Foundation (Weeks 1–2)
+*Project scaffold & core infrastructure*
 
-### 1.1 CMake + vcpkg scaffold
-Top-level `CMakeLists.txt`, per-module sub-lists (core, ml, mesh, export). `vcpkg.json` manifest. Proves the build toolchain works end-to-end with at least one non-trivial dep (OpenCV).
-**Tech:** CMake 3.26+, vcpkg, MSVC 2022
+### 1.1 CMake Project Structure
+Modular CMake setup: core lib, ML module, mesh module, export module, server module, UE5 plugin wrapper. Windows-first, Linux-compatible.  
+**Tech:** CMake, C++20, vcpkg
 
-### 1.2 UE5 plugin ↔ CMake library integration spike
-**Budget a full week for this.** UBT linking against vcpkg-built binaries is a known pain point. Resolve it on empty stubs before writing real code. Deliverable: UE5 Editor loads the plugin, calls a stub function in the CMake library, returns "hello world."
-**Tech:** UE5 5.3+, UBT, Third Party Module pattern
+### 1.2 Image Input Layer
+Load PNG/JPG/BMP/TIFF concept art. Multi-view support (front/side/back). Basic preprocessing: normalize, resize, contrast enhance per-style.  
+**Tech:** OpenCV, stb_image
 
-### 1.3 Adapter interfaces
-Define `ISegmenter`, `IReconstructor`, `IReviewer` headers. Stub implementations that return fake data. Wire them through the pipeline skeleton end-to-end with fake data so the whole flow compiles.
-**Tech:** C++20
+### 1.3 Python Sidecar IPC
+C++ launches Python subprocess. Communication via local socket or named pipe. JSON protocol for commands and results. Heartbeat + auto-restart.  
+**Tech:** Boost.Asio, nlohmann/json, Python 3.11
 
-### 1.4 Image Input Layer
-Load PNG/JPG/BMP/TIFF. Multi-view grouping (front/side/back). Normalize + letterbox to 512². CLIP embedding for style_tag (from ONNX).
-**Tech:** OpenCV, stb_image, ONNX Runtime
+### 1.4 SQLite Component Library Schema
+Tables: components, corrections, style_fingerprints, pipeline_settings, quality_history. Migrations system from day one.  
+**Tech:** SQLite3, C++ ORM wrapper
 
-### 1.5 Python sidecar IPC
-Spawn Python 3.11 subprocess. JSON protocol over local socket / named pipe. Heartbeat + auto-restart. Round-trip a "ping" / "pong" before any ML code ships.
-**Tech:** plain sockets, nlohmann/json, Python 3.11
-
-### 1.6 SQLite schema v1
-`generations` and `reviews` tables (see architecture.md §8). Migration infrastructure from day one.
-**Tech:** SQLite3
+### 1.5 Basic UE5 Plugin Shell
+Editor module, empty toolbar button, settings panel exposing API key field and budget cap. Plugin descriptor and build targets.  
+**Tech:** UE5 C++, Slate UI
 
 ---
 
-## Phase 2 — Segmentation + Classification (Weeks 4–5)
-*SAM2 + component classifier, hard-surface only*
+## Phase 2 — Segmentation (Weeks 3–4)
+*SAM2-powered part isolation*
 
-### 2.1 SAM2 ONNX via segmentation adapter
-Export SAM2 to ONNX. Run via ONNX Runtime C++ behind the `ISegmenter` interface. Auto-segment mode.
-**Tech:** SAM2, ONNX Runtime
+### 2.1 SAM2 ONNX Integration
+Export SAM2 weights to ONNX. Run via ONNX Runtime C++ API. Auto-segment mode first, then prompt-guided refinement.  
+**Tech:** ONNX Runtime, SAM2, CUDA optional
 
-### 2.2 Hard-surface component classifier
-MobileNetV3-based ONNX model classifying masks into: helmet, chest_armor, pauldron, gauntlets, greaves, boots, weapon_primary, shield, belt, backpack, cape, other/unsupported.
-**Tech:** MobileNetV3 (ONNX), OpenCV
+### 2.2 Component Classifier
+Post-SAM2 classification of each mask: hair, shirt, pants, boots, armor, weapon, accessory. Small ONNX classifier.  
+**Tech:** ONNX Runtime, OpenCV
 
-### 2.3 Unsupported-component warning UI
-When the classifier detects hair, cloth, dress, robe, beard — surface a clear warning in the Editor: *"Cloth/hair not supported in V1. These parts will be skipped."*
-**Tech:** UE5 Slate
+### 2.3 Style Fingerprinting
+Detect art style from input: realistic, anime, dark_fantasy, cartoon, stylized. Drives downstream parameter selection. Stored per-generation.  
+**Tech:** CLIP ONNX, SQLite
 
-### 2.4 Mask post-processing
-Feathering, background removal, per-component padding for reconstruction input.
-**Tech:** OpenCV
+### 2.4 Mask Post-processing
+Clean isolated part images: feathering, background removal, padding for 3D reconstruction. Output per-part image set.  
+**Tech:** OpenCV, libtiff
 
 ---
 
-## Phase 3 — 2D → 3D + Mesh Processing (Weeks 6–7)
-*TripoSR + cleanup + UV + texture projection*
+## Phase 3 — 2D → 3D (Weeks 5–7)
+*Per-part mesh reconstruction*
 
-### 3.1 TripoSR via reconstruction adapter
-Python sidecar runs TripoSR. Configurable per-component settings surfaced through `IReconstructor`. Returns .glb.
+### 3.1 TripoSR Python Sidecar
+Python sidecar runs TripoSR locally. Receives masked part image, returns .glb. Configurable settings per component type.  
 **Tech:** TripoSR, PyTorch, trimesh
 
-### 3.2 Mesh cleanup pipeline
-Degenerate face removal, hole filling (watertight), non-manifold fix, normal smoothing. Decimation to LOD0/LOD1/LOD2 targets.
-**Tech:** OpenMesh, libigl
+### 3.2 SF3D Fallback
+SF3D as alternative backend. Automatic selection based on component type. Fallback chain if primary fails.  
+**Tech:** SF3D, Python sidecar
 
-### 3.3 UV unwrapping
-xatlas per-component. Padding config per type. Atlas packing ≥ 75%.
+### 3.3 Mesh Cleanup Pipeline
+Remove degenerate faces, fill holes, smooth normals, decimate to target poly count per LOD0/LOD1/LOD2.  
+**Tech:** OpenMesh, CGAL, libigl
+
+### 3.4 UV Unwrapping
+xatlas per-component UV generation. Component-specific settings. Atlas packing per character.  
 **Tech:** xatlas
 
-### 3.4 Texture projection
-Project concept art onto mesh. Multi-angle blend if multi-view provided. Inpaint occluded regions.
-**Tech:** OpenCV, libigl, Pillow (Python side)
+### 3.5 Texture Projection
+Project original concept art onto reconstructed mesh. Multi-angle blending. Inpaint occluded regions.  
+**Tech:** OpenCV, libigl, Python/Pillow
 
 ---
 
-## Phase 4 — Fitting & Rigging (Weeks 8–11) — *the hard one*
-*Budget 4 weeks. This is where V1 succeeds or fails.*
+## Phase 4 — Assembly (Weeks 8–10)
+*Fitting, rigging & skinning*
 
-### 4.1 Base skeleton template
-Pick **one** skeleton (UE5 Mannequin recommended). Define standard sockets. Ship as read-only template FBX bundled with the plugin.
-**Tech:** FBX template, UE5 Skeleton asset
+### 4.1 Base Body Template System
+Master skeleton + base meshes (male/female/creature). All generated parts fit to these. Read-only in pipeline.  
+**Tech:** C++, Assimp, FBX SDK
 
-### 4.2 Mesh fitting / wrapping
-Wrap generated mesh to base body surface. Offset distance per component type from hand-curated defaults. Detect and prevent interpenetration.
-**Tech:** libigl deformation, distance fields
+### 4.2 Mesh Fitting / Wrapping
+Wrap generated clothing to base body surface. Offset distance learned per component type. No interpenetration.  
+**Tech:** libigl, CGAL, custom deformation
 
-### 4.3 Skinning weights
-Bounded biharmonic weights via libigl. Max 8 influences per vertex. Post-corrections for shoulders, ankles.
+### 4.3 Skeleton Socket Attachment
+Rule-based attachment per component type. Hair→head, weapon→hand, cape→spine. Learned offset corrections from DB.  
+**Tech:** C++, UE5 Skeleton API
+
+### 4.4 Skinning Weights
+Bounded biharmonic weights via libigl per component. Post-process known problem zones (fingers, shoulders, ankles).  
 **Tech:** libigl, Eigen
 
-### 4.4 Socket attachment
-Rule-based (weapon → hand_r, helmet → head, shield → hand_l, backpack → spine_03, etc.). Offsets read from defaults, overridable via recipe book.
-**Tech:** UE5 Skeleton API
-
-### 4.5 Modular mesh assembly + export
-Output one Skeletal Mesh per component, all referencing the master skeleton. Material slot naming convention for Blueprint swapping. Export via Assimp to glTF primarily; FBX optional.
-**Tech:** Assimp, UE5 Skeletal Mesh factory
+### 4.5 Modular Mesh Assembly
+Combine parts sharing master skeleton. Output as UE5 Modular Skeletal Mesh set — separate assets per component.  
+**Tech:** UE5 C++, FBX SDK, Assimp
 
 ---
 
-## Phase 5 — Quality Review + Recipe Book (Weeks 12–13)
-*Tier 1 heuristics + Tier 3 on-demand Claude review + local recipe book*
+## Phase 5 — Self-Improvement (Weeks 11–13)
+*Tiered learning & feedback loop*
 
-### 5.1 Tier 1 heuristics
-Watertight, UV overlap, poly count, normal consistency, texture stretch, silhouette match. All deterministic, free, always runs.
+### 5.1 Tier 1: Local Heuristics Engine
+Free C++ quality checks: watertight, UV overlap, poly count, normal consistency, texture stretch, silhouette match.  
 **Tech:** C++, libigl, OpenCV
 
-### 5.2 Claude reviewer adapter (Tier 3)
-`IReviewer` implementation. Renders mesh from ~4 angles, packages renders + Tier 1 metrics + component type + style tag, sends to Claude API. Parses structured response (fix from preset catalog). User-initiated only.
-**Tech:** libcurl, Claude API, nlohmann/json
+### 5.2 Tier 2: Local ONNX Classifier
+Small quality classifier trained on local correction history. Retrained weekly. Replaces most API calls over time.  
+**Tech:** ONNX Runtime, PyTorch training, SQLite
 
-### 5.3 Fix catalog executor
-C++ executor for the preset fix operations: `remesh_higher_density`, `repack_uv_larger_padding`, `refit_offset_increase`, `reproject_texture_different_angle`, `regenerate_with_different_backend`, `accept_as_is`. Each is a well-defined pipeline re-run on the affected stage.
+### 5.3 Tier 3: API Feedback Integration
+Vision model call for novel/low-confidence cases only. Structured JSON → C++ fix executor. Hard monthly budget cap.  
+**Tech:** Anthropic API, nlohmann/json, C++
+
+### 5.4 Correction Pattern DB
+Log every correction: component type, style fingerprint, settings before/after, quality delta, source tier.  
+**Tech:** SQLite3, C++
+
+### 5.5 Fix Library (C++)
+Executable fixes: remesh, repack UVs, adjust smoothing, refit clothing, rebuild skinning zone, re-project texture.  
 **Tech:** C++, OpenMesh, libigl, xatlas
 
-### 5.4 Recipe book read/write
-On generation: lookup best-weighted settings for `(component_type, style_tag, current_model_versions)`. Pre-apply. After generation: log full record including user accept/reject.
-**Tech:** SQLite3
-
-### 5.5 API budget + key management
-API key stored in OS keychain. Monthly spend display. Budget cap enforced client-side. All Tier 3 calls are user-initiated so budget can be hit only through explicit user action.
-**Tech:** OS keychain, UE5 Slate
+### 5.6 Batch Deferred Review
+Queue uncertain meshes during session. End-of-session batch API call reviews all at once. Cost estimate shown to user.  
+**Tech:** C++, JSON batching
 
 ---
 
-## Phase 6 — UI & Release Polish (Week 14)
-*Editor UI, docs, GitHub release*
+## Phase 6 — Global Network (Weeks 14–16)
+*Crowdsourced improvement system*
 
-### 6.1 Editor UI
-Image drop zone. Style tag display. Component preview with Tier 1 metrics. "Review with AI" button per component. Accept / reject buttons. Content Browser import on accept.
-**Tech:** UE5 Slate
+### 6.1 Anonymization Layer
+Strip all user identity before upload. Rotating weekly hash. Upload code open-sourced for user verification.  
+**Tech:** C++, libsodium, open source
 
-### 6.2 Component library browser
-Simple in-editor browser of previously generated components (queried from the recipe book). Filter by type, style, date. Thumbnail previews.
-**Tech:** UE5 Slate, SQLite
+### 6.2 Global Server
+REST API server. Receives anonymised corrections, aggregates, serves model updates. ~$5–20/mo VPS.  
+**Tech:** Rust/axum, PostgreSQL, REST
 
-### 6.3 Docs + release
-README, CONTRIBUTING, PRIVACY, setup guide, known limitations section (explicitly lists what's unsupported). GitHub release tagged v0.1.0.
-**Tech:** Markdown, GitHub
+### 6.3 Global Tier 2 Model Retraining
+Weekly automated retraining on all user data. ONNX export. Quality gate before publish. Versioned with rollback.  
+**Tech:** PyTorch, cron/CI, ONNX export
+
+### 6.4 Plugin Update Sync
+Silent background version check on launch. SHA256 integrity verification. Hot-loaded without Editor restart.  
+**Tech:** C++, libcurl, versioned CDN
+
+### 6.5 Style Fingerprint Library
+Monthly aggregated style→settings map published globally. Pre-tunes pipeline for art styles users haven't seen.  
+**Tech:** JSON distribution, SQLite merge
+
+---
+
+## Phase 7 — Polish & Release (Weeks 17–20)
+*UE5 integration, UI & open source*
+
+### 7.1 Full UE5 Editor UI
+Image drop zone, component type override, style tag display, quality score display, per-part approve/reject, Content Browser import.  
+**Tech:** UE5 Slate, C++
+
+### 7.2 Component Library Browser
+In-editor browser of all generated parts. Filter by type, style, date. Mix-and-match. Thumbnail previews.  
+**Tech:** UE5 Slate, SQLite, C++
+
+### 7.3 API Key & Budget UI
+API key stored in OS keychain. Monthly spend display. Budget cap control. Opt-in/out global sharing toggle.  
+**Tech:** UE5 Slate, OS keychain
+
+### 7.4 GitHub Open Source Release
+MIT license. README, CONTRIBUTING, PRIVACY docs. Separate repos: plugin, server, training.  
+**Tech:** GitHub, Markdown
+
+### 7.5 Epic Marketplace Listing (Free)
+Free listing for discoverability. Links to GitHub. 5+ screenshots, demo video, supported UE5 versions tagged.  
+**Tech:** Epic Marketplace
 
 ---
 
 ## Timeline Summary
 
-| Phase | Title | Weeks | Part-time est. |
-|---|---|---|---|
-| 1 | Foundation | 1–3 | 3 wk |
-| 2 | Segmentation | 4–5 | 2 wk |
-| 3 | 2D→3D + Mesh | 6–7 | 2 wk |
-| 4 | Fitting & Rigging | 8–11 | 4 wk *(the hard one)* |
-| 5 | Quality Review + Recipe Book | 12–13 | 2 wk |
-| 6 | UI & Release | 14 | 1 wk |
+| Phase | Title | Weeks |
+|---|---|---|
+| 1 | Foundation | 1–2 |
+| 2 | Segmentation | 3–4 |
+| 3 | 2D → 3D | 5–7 |
+| 4 | Assembly | 8–10 |
+| 5 | Self-Improvement | 11–13 |
+| 6 | Global Network | 14–16 |
+| 7 | Polish & Release | 17–20 |
 
-**Total V1 part-time estimate: ~14 weeks** (vs original plan's 20). Shorter despite being more honest, because the cuts (no Tier 2, no server, no cloth/hair, no multi-skeleton) remove ~6 weeks of work.
-
----
-
-## Quality Expectations
+## Quality Milestones
 
 | Milestone | Expected Output Quality |
 |---|---|
-| End of Phase 4 | Rigged hard-surface assets that fit the base skeleton and don't interpenetrate. Usable but rough textures. |
-| End of Phase 5 | Usable assets with Tier 1 gating obvious failures + optional AI review for suggested fixes. |
-| After 50 personal generations | Pre-applied settings from the recipe book give noticeable time savings on repeat styles. |
-
-**No promises about "90%+ quality after N generations."** The quality ceiling is set by TripoSR and SAM2. No recipe-book learning exceeds that ceiling. What the recipe book does is **get the user to that ceiling faster on their own art style**.
-
-When TripoSR is replaced by a better model, the ceiling rises — and because of the adapter boundary, that upgrade is a one-file change.
-
----
-
-## Post-V1 Candidates (*not committed*)
-
-Only considered if V1 ships and has users:
-
-- **Cloth & hair support** — when single-image reconstruction for soft surfaces becomes reliable.
-- **Multiple base skeletons** — once fitting quality is proven on the first one.
-- **Tier 2 local classifier** — once a user has 300+ personal generations to train on.
-- **Opt-in anonymised sharing** — only if demanded; server infrastructure stays deferred.
-- **Additional component types** — based on actual user requests, not speculative coverage.
+| End of Phase 4 | ~65% — basic rigged character, rough textures |
+| End of Phase 5 | ~75% — self-correcting, consistent quality |
+| After 200 generations (learned) | ~85–88% |
+| After 500+ generations (mature) | ~90–93% |
