@@ -1,0 +1,60 @@
+# Build
+build/
+out/
+cmake-build-*/
+*.cmake
+!CMakeLists.txt
+
+# vcpkg
+vcpkg_installed/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.sln.docinfo
+
+# UE5
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+*.uproject.lock
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Generated models (large binary, not committed)
+*.onnx
+!training/models/baseline_classifier.onnx
+
+# Local DB (user data, never committed)
+*.db
+*.db-shm
+*.db-wal
+
+# API keys / secrets (should never appear but just in case)
+*.key
+*.pem
+secrets.json
+.env
+
+# Test output
+tests/output/
+tests/tmp/
+
+# Python sidecar temp
+python_sidecar/tmp/
+python_sidecar/*.glb
